@@ -1,9 +1,10 @@
 import os
 import stat
 import subprocess
+import sys
 
 from .posix import PosixProcessProvider
-from .provider import FirewallProvider, RouteProvider, TunnelPrepProvider
+from .provider import FirewallProvider, RouteProvider, SplitDNSProvider, TunnelPrepProvider
 from .util import get_executable
 
 
@@ -109,3 +110,36 @@ class CheckTunDevProvider(TunnelPrepProvider):
     def prepare_tunnel(self):
         if not os.access('/dev/net/tun', os.R_OK | os.W_OK):
             raise OSError("can't read and write /dev/net/tun")
+
+class LinuxSplitDNSProvider(SplitDNSProvider):
+    def configure_domain_vpn_dns(self, domains, nameservers, dev):
+        # Check that /etc/resolv.conf exists and is managed by systemd-resolved, since that's required for this provider to work.
+        if not os.path.exists('/etc/resolv.conf'):
+            raise OSError("/etc/resolv.conf does not exist; cannot configure DNS")
+        
+        with open('/etc/resolv.conf', 'r') as f:
+            resolv_conf = f.read()
+            if 'systemd-resolved' not in resolv_conf:
+                raise OSError("systemd-resolved does not appear to be managing /etc/resolv.conf; cannot configure DNS")        
+        
+        resolvectl = get_executable('/sbin/resolvectl')
+        try:
+            # Configure nameservers
+            subprocess.check_call([resolvectl, 'dns', dev] + [str(ns) for ns in nameservers])
+        except subprocess.CalledProcessError as e:
+            raise OSError(f"Failed to configure DNS: {e}")
+        try:
+            # Configure search domains
+            subprocess.check_call([resolvectl, 'domain', dev] + domains)
+        except subprocess.CalledProcessError as e:
+            raise OSError(f"Failed to configure domain: {e}")
+        try:
+            # Remove default route
+            subprocess.check_call([resolvectl, 'default-route', dev, "false"])
+        except subprocess.CalledProcessError as e:
+            raise OSError(f"Failed to configure default route: {e}")
+
+    def deconfigure_domain_vpn_dns(self, domains, nameservers, dev):
+        # There is nothing to do here, systemd-resolved will automatically remove the configuration when the device is removed.
+        pass
+        
