@@ -113,15 +113,25 @@ class CheckTunDevProvider(TunnelPrepProvider):
 
 class LinuxSplitDNSProvider(SplitDNSProvider):
     def configure_domain_vpn_dns(self, domains, nameservers, dev):
-        # Check that /etc/resolv.conf exists and is managed by systemd-resolved, since that's required for this provider to work.
-        if not os.path.exists('/etc/resolv.conf'):
-            raise OSError("/etc/resolv.conf does not exist; cannot configure DNS")
+        try:
+            status = subprocess.check_output(
+                ['systemctl', 'is-active', 'systemd-resolved'],
+                universal_newlines=True,
+                stderr=subprocess.STDOUT
+            ).strip()
+        except subprocess.CalledProcessError as e:
+            raise OSError("systemd-resolved is not active; cannot configure DNS") from e
+
+        if status != 'active':
+            raise OSError("systemd-resolved is not active; cannot configure DNS")
         
-        with open('/etc/resolv.conf', 'r') as f:
-            resolv_conf = f.read()
-            if 'systemd-resolved' not in resolv_conf:
-                raise OSError("systemd-resolved does not appear to be managing /etc/resolv.conf; cannot configure DNS")        
-        
+        try:
+            with open('/etc/resolv.conf', 'r') as f:
+                if 'nameserver 127.0.0.53' not in f.read():
+                    print("/etc/resolv.conf does not contain 127.0.0.53, are you sure you are using systemd-resolved?")
+        except FileNotFoundError:
+            raise OSError("/etc/resolv.conf not found")
+
         resolvectl = get_executable('/sbin/resolvectl')
         try:
             # Configure nameservers
@@ -130,7 +140,7 @@ class LinuxSplitDNSProvider(SplitDNSProvider):
             raise OSError(f"Failed to configure DNS: {e}")
         try:
             # Configure search domains
-            subprocess.check_call([resolvectl, 'domain', dev] + domains)
+            subprocess.check_call([resolvectl, 'domain', dev] + [f"~{domain}" for domain in domains])
         except subprocess.CalledProcessError as e:
             raise OSError(f"Failed to configure domain: {e}")
         try:
@@ -140,6 +150,10 @@ class LinuxSplitDNSProvider(SplitDNSProvider):
             raise OSError(f"Failed to configure default route: {e}")
 
     def deconfigure_domain_vpn_dns(self, domains, nameservers, dev):
-        # There is nothing to do here, systemd-resolved will automatically remove the configuration when the device is removed.
-        pass
+        resolvectl = get_executable('/sbin/resolvectl')
+        try:
+            subprocess.check_call([resolvectl, 'revert', dev])
+        except subprocess.CalledProcessError as e:
+            raise OSError(f"Failed to revert DNS configuration: {e}")
+        
         
